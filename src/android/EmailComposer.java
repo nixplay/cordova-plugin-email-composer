@@ -22,6 +22,7 @@
 package de.appplant.cordova.plugin.emailcomposer;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -33,7 +34,6 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import android.content.Intent;
-import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.net.Uri;
 import android.text.Html;
@@ -47,23 +47,18 @@ public class EmailComposer extends CordovaPlugin {
 
     static protected final String STORAGE_FOLDER = File.separator + "email_composer";
 
-    private CallbackContext command;
-
     @Override
     public boolean execute (String action, JSONArray args, CallbackContext callbackContext) throws JSONException {
-
-        this.command = callbackContext;
-
         // Eine E-Mail soll versendet werden
         if ("open".equals(action)) {
-            open(args);
+            open(args, callbackContext);
 
             return true;
         }
 
         // Es soll überprüft werden, ob ein Dienst zum Versenden der E-Mail zur Verfügung steht
         if ("isServiceAvailable".equals(action)) {
-            isServiceAvailable();
+            isServiceAvailable(callbackContext);
 
             return true;
         }
@@ -75,19 +70,19 @@ public class EmailComposer extends CordovaPlugin {
     /**
      * Überprüft, ob Emails versendet werden können.
      */
-    private void isServiceAvailable () {
+    private void isServiceAvailable (CallbackContext ctx) {
         Boolean available   = isEmailAccountConfigured();
         PluginResult result = new PluginResult(PluginResult.Status.OK, available);
 
-        command.sendPluginResult(result);
+        ctx.sendPluginResult(result);
     }
 
     /**
      * Öffnet den Email-Kontroller mit vorausgefüllten Daten.
      */
-    private void open (JSONArray args) throws JSONException {
+    private void open (JSONArray args, CallbackContext ctx) throws JSONException {
         JSONObject properties = args.getJSONObject(0);
-        Intent draft          = getDraftWithProperties(properties);
+        Intent     draft      = getDraftWithProperties(properties);
 
         openDraft(draft);
     }
@@ -98,7 +93,11 @@ public class EmailComposer extends CordovaPlugin {
      * @param {JSONObject} params (Subject, Body, Recipients, ...)
      */
     private Intent getDraftWithProperties (JSONObject params) throws JSONException {
-        Intent mail = new Intent(android.content.Intent.ACTION_SEND_MULTIPLE);
+        // Intent mail = new Intent(android.content.Intent.ACTION_SEND_MULTIPLE);
+
+        Intent mail = new Intent(Intent.ACTION_SEND_MULTIPLE);
+        mail.setType("message/rfc822");
+        mail.setClassName("com.google.android.gm", "com.google.android.gm.ComposeActivityGmail");
 
         if (params.has("subject"))
             setSubject(params.getString("subject"), mail);
@@ -110,10 +109,11 @@ public class EmailComposer extends CordovaPlugin {
             setCcRecipients(params.getJSONArray("cc"), mail);
         if (params.has("bcc"))
             setBccRecipients(params.getJSONArray("bcc"), mail);
-        if (params.has("attachments"))
+        if (params.has("attachments")) {
             setAttachments(params.getJSONArray("attachments"), mail);
+        }
 
-        mail.setType("application/octet-stream");
+        // mail.setType("application/octet-stream");
 
         return mail;
     }
@@ -126,7 +126,8 @@ public class EmailComposer extends CordovaPlugin {
 
         cordova.getThreadPool().execute( new Runnable() {
             public void run() {
-                cordova.startActivityForResult(plugin, Intent.createChooser(draft, "Select Email App"), 0);
+                // cordova.startActivityForResult(plugin, Intent.createChooser(draft, "Select Email App"), 0);
+                cordova.startActivityForResult(plugin, draft, 0);
             }
         });
     }
@@ -224,12 +225,10 @@ public class EmailComposer extends CordovaPlugin {
      * @return The URI pointing to the given path
      */
     private Uri getUriForPath (String path) {
-        if (path.startsWith("res:")) {
-            return getUriForResourcePath(path);
-        } else if (path.startsWith("file:")) {
+        if (path.startsWith("relative://")) {
+            return getUriForRelativePath(path);
+        } else if (path.startsWith("absolute://")) {
             return getUriForAbsolutePath(path);
-        } else if (path.startsWith("www:")) {
-            return getUriForAssetPath(path);
         } else if (path.startsWith("base64:")) {
             return getUriForBase64Content(path);
         }
@@ -238,7 +237,7 @@ public class EmailComposer extends CordovaPlugin {
     }
 
     /**
-     * The URI for a file.
+     * The URI for an absolute path.
      *
      * @param {String} path
      *      The given absolute path
@@ -246,7 +245,7 @@ public class EmailComposer extends CordovaPlugin {
      * @return The URI pointing to the given path
      */
     private Uri getUriForAbsolutePath (String path) {
-        String absPath = path.replaceFirst("file://", "");
+        String absPath = path.replaceFirst("absolute://", "/");
         File file      = new File(absPath);
 
         if (!file.exists()) {
@@ -257,59 +256,25 @@ public class EmailComposer extends CordovaPlugin {
     }
 
     /**
-     * The URI for an asset.
-     *
-     * @param {String} path
-     *      The given asset path
-     *
-     * @return The URI pointing to the given path
-     */
-    private Uri getUriForAssetPath (String path) {
-        String resPath  = path.replaceFirst("www:/", "www");
-        String fileName = resPath.substring(resPath.lastIndexOf('/') + 1);
-        String storage  = cordova.getActivity().getExternalCacheDir().toString() + STORAGE_FOLDER;
-
-        File file = new File(storage, fileName);
-
-        new File(storage).mkdir();
-
-        try {
-            AssetManager assets = cordova.getActivity().getAssets();
-
-            FileOutputStream outStream = new FileOutputStream(file);
-            InputStream inputStream    = assets.open(resPath);
-
-            copyFile(inputStream, outStream);
-            outStream.flush();
-            outStream.close();
-        } catch (Exception e) {
-            System.err.println("Attachment asset not found: assets/" + resPath);
-            e.printStackTrace();
-        }
-
-        return Uri.fromFile(file);
-    }
-
-    /**
-     * The URI for a resource.
+     * The URI for a relative path.
      *
      * @param {String} path
      *      The given relative path
      *
      * @return The URI pointing to the given path
      */
-    private Uri getUriForResourcePath (String path) {
-        String resPath   = path.replaceFirst("res://", "");
+    private Uri getUriForRelativePath (String path) {
+        String resPath   = path.replaceFirst("relative://", "");
         String fileName  = resPath.substring(resPath.lastIndexOf('/') + 1);
         String resName   = fileName.substring(0, fileName.lastIndexOf('.'));
         String extension = resPath.substring(resPath.lastIndexOf('.'));
-        String storage   = cordova.getActivity().getExternalCacheDir().toString() + STORAGE_FOLDER;
+        String storage   = cordova.getActivity().getExternalCacheDir().toString() + "/email_composer";
 
         int resId        = getResId(resPath);
         File file        = new File(storage, resName + extension);
 
         if (resId == 0) {
-            System.err.println("Attachment resource not found: " + resPath);
+            System.err.println("Attachment ressource not found: " + resPath);
         }
 
         new File(storage).mkdir();
@@ -322,7 +287,9 @@ public class EmailComposer extends CordovaPlugin {
             copyFile(inputStream, outStream);
             outStream.flush();
             outStream.close();
-        } catch (Exception e) {
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
             e.printStackTrace();
         }
 
@@ -352,7 +319,9 @@ public class EmailComposer extends CordovaPlugin {
             outStream.write(bytes);
             outStream.flush();
             outStream.close();
-        } catch (Exception e) {
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
             e.printStackTrace();
         }
 
@@ -402,12 +371,5 @@ public class EmailComposer extends CordovaPlugin {
      */
     private String getPackageName () {
         return cordova.getActivity().getPackageName();
-    }
-
-    @Override
-    public void onActivityResult(int requestCode, int resultCode, Intent intent) {
-        super.onActivityResult(requestCode, resultCode, intent);
-
-        command.success();
     }
 }
